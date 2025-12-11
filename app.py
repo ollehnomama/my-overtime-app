@@ -74,23 +74,29 @@ def local_css():
         </style>
         """, unsafe_allow_html=True)
 
-# --- 資料讀取與處理 (已加入防錯機制) ---
+# --- 資料讀取與處理 (包含錯誤修復) ---
 def load_data():
+    # 定義標準欄位，避免重複寫
+    columns = [
+        "提交時間", "姓名", "類型", "日期", 
+        "開始時間", "結束時間", "時數", "備註", 
+        "審核狀態", "審核時間", "月份"
+    ]
+
     if os.path.exists(DATA_FILE):
         try:
             df = pd.read_csv(DATA_FILE)
             
-            # 補齊欄位
+            # 補齊可能缺少的欄位
             if "審核狀態" not in df.columns: df["審核狀態"] = "待審核"
             if "審核時間" not in df.columns: df["審核時間"] = ""
             df["審核狀態"] = df["審核狀態"].fillna("待審核")
             df["審核時間"] = df["審核時間"].fillna("")
 
-            # --- 關鍵修正：加入 errors='coerce' ---
-            # 這會把讀不懂的怪日期轉成 NaT (空值)，而不是讓程式崩潰
+            # 處理日期格式 (關鍵修復：加入 errors='coerce' 避免報錯)
             df["日期"] = pd.to_datetime(df["日期"], errors='coerce')
             
-            # 刪除日期轉換失敗的壞資料行
+            # 刪除日期轉換失敗的壞資料
             df = df.dropna(subset=["日期"])
             
             # 產生月份欄位
@@ -98,11 +104,165 @@ def load_data():
             
             return df
             
-        except Exception as e:
-            # 萬一 CSV 檔案壞得太徹底，直接回傳空表格，避免網站掛掉
-            return pd.DataFrame(columns=[
-                "提交時間", "姓名", "類型", "日期", 
-                "開始時間", "結束時間", "時數", "備註", 
-                "審核狀態", "審核時間", "月份"
-            ])
+        except Exception:
+            # 如果讀取失敗，回傳空表格
+            return pd.DataFrame(columns=columns)
     else:
+        # 如果檔案不存在，回傳空表格
+        return pd.DataFrame(columns=columns)
+
+def save_data(df):
+    df.to_csv(DATA_FILE, index=False)
+
+# --- 主程式 ---
+def main():
+    local_css()
+    st.set_page_config(page_title="班表管理", page_icon=None)
+    
+    st.title("團隊時數管理系統")
+
+    df = load_data()
+
+    # === 區塊 1: 員工申請區 ===
+    st.markdown("### 員工申請區")
+    with st.expander("點擊展開填寫表單", expanded=True):
+        with st.form("application_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                name = st.text_input("姓名 (請輸入全名)")
+                date = st.date_input("日期", datetime.today())
+            with col2:
+                apply_type = st.selectbox("申請類型", ["加班", "抵班/補休"])
+            
+            col3, col4 = st.columns(2)
+            with col3:
+                start_time = st.time_input("開始時間", datetime.strptime("09:00", "%H:%M").time())
+            with col4:
+                end_time = st.time_input("結束時間", datetime.strptime("18:00", "%H:%M").time())
+            
+            note = st.text_area("備註 (選填)")
+            submitted = st.form_submit_button("送出申請")
+
+            if submitted:
+                if name == "":
+                    st.error("請輸入姓名！")
+                else:
+                    start_dt = datetime.combine(date, start_time)
+                    end_dt = datetime.combine(date, end_time)
+                    if end_dt <= start_dt:
+                        st.error("結束時間必須晚於開始時間！")
+                    else:
+                        duration = (end_dt - start_dt).total_seconds() / 3600
+                        duration = round(duration, 1)
+                        month_str = date.strftime("%Y-%m")
+                        
+                        new_data = {
+                            "提交時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "姓名": name, "類型": apply_type, "日期": date,
+                            "開始時間": start_time.strftime("%H:%M"), 
+                            "結束時間": end_time.strftime("%H:%M"), 
+                            "時數": duration,
+                            "備註": note, "審核狀態": "待審核", "審核時間": "",
+                            "月份": month_str
+                        }
+                        df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
+                        save_data(df)
+                        st.success(f"已送出！狀態：待審核")
+
+    st.markdown("---")
+
+    # === 區塊 2: 管理後台 ===
+    st.sidebar.header("管理員登入")
+    input_password = st.sidebar.text_input("輸入密碼查看報表", type="password")
+
+    if input_password == ADMIN_PASSWORD:
+        st.sidebar.success("身份驗證成功")
+        st.header("管理員報表")
+
+        if not df.empty:
+            # --- 審核區 ---
+            st.subheader("待審核項目")
+            pending_df = df[df["審核狀態"] == "待審核"]
+            
+            if pending_df.empty:
+                st.info("目前沒有待審核的項目。")
+            else:
+                for index, row in pending_df.iterrows():
+                    with st.container():
+                        c1, c2, c3, c4, c5 = st.columns([1.5, 2, 2, 1, 1])
+                        c1.text(f"{row['姓名']}")
+                        
+                        try:
+                            date_display = row['日期'].strftime('%Y-%m-%d') if isinstance(row['日期'], pd.Timestamp) else str(row['日期'])
+                        except:
+                            date_display = str(row['日期'])
+
+                        c2.text(f"{date_display}")
+                        c3.text(f"{row['類型']}")
+                        c4.text(f"{row['時數']}")
+                        
+                        if c5.button("通過", key=f"btn_{index}"):
+                            df.at[index, "審核狀態"] = "已通過"
+                            df.at[index, "審核時間"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                            save_data(df)
+                            st.rerun()
+                        st.markdown("<hr style='margin: 5px 0; opacity: 0.3;'>", unsafe_allow_html=True)
+
+            st.markdown("---")
+
+            # --- 全域篩選器 ---
+            st.subheader("報表篩選")
+            all_months = sorted(df["月份"].dropna().unique().tolist(), reverse=True)
+            selected_month = st.selectbox("請選擇月份", ["全部"] + all_months)
+            
+            if selected_month == "全部":
+                filtered_df = df
+                st.caption("目前顯示：所有時間累計")
+            else:
+                filtered_df = df[df["月份"] == selected_month]
+                st.caption(f"目前顯示：{selected_month} 月份資料")
+
+            # --- 統計區 ---
+            st.subheader("人員時數統計 (已通過)")
+            approved_df = filtered_df[filtered_df["審核狀態"] == "已通過"]
+            summary = approved_df.groupby(['姓名', '類型'])['時數'].sum().unstack(fill_value=0)
+            
+            for col in ["加班", "抵班/補休"]:
+                if col not in summary.columns: summary[col] = 0.0
+
+            summary = summary.rename(columns={"加班": "加班總時數", "抵班/補休": "已抵休時數"})
+            summary["小計/餘額"] = summary["加班總時數"] - summary["已抵休時數"]
+            
+            st.dataframe(
+                summary.style.format("{:.1f}")
+                .map(lambda x: 'color: #A03C3C' if x < 0 else 'color: #4A5D23', subset=['小計/餘額']),
+                use_container_width=True
+            )
+
+            # --- 歷史明細 ---
+            st.subheader("申請明細列表")
+            filter_person = st.selectbox("篩選特定員工", ["全部"] + list(df["姓名"].unique()))
+            
+            view_df = filtered_df
+            if filter_person != "全部":
+                view_df = view_df[view_df["姓名"] == filter_person]
+
+            view_df_display = view_df.copy()
+            if not view_df_display.empty:
+                view_df_display["日期"] = view_df_display["日期"].apply(
+                    lambda x: x.strftime('%Y-%m-%d') if isinstance(x, pd.Timestamp) else str(x)
+                )
+
+            st.dataframe(
+                view_df_display.sort_values("提交時間", ascending=False)
+                .style.format({"時數": "{:.1f}"})
+                .map(lambda v: 'color: #4A5D23; font-weight: bold' if v == '已通過' else 'color: #999999', subset=['審核狀態']),
+                use_container_width=True
+            )
+        else:
+            st.info("尚無資料。")
+    elif input_password != "":
+        st.sidebar.error("密碼錯誤")
+
+if __name__ == "__main__":
+    main()
