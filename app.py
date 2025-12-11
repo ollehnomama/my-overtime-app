@@ -12,6 +12,9 @@ if "admin_password" in st.secrets:
 else:
     ADMIN_PASSWORD = "boss"
 
+# --- 產生 30 分鐘間隔的時間列表 (00:00 ~ 23:30) ---
+TIME_OPTIONS = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
+
 # --- Aesop 風格 CSS ---
 def local_css():
     st.markdown("""
@@ -32,7 +35,7 @@ def local_css():
         [data-testid="stDataFrame"] th { background-color: #E0DED0 !important; color: #333333 !important; }
         div[data-testid="stDialog"] { border-radius: 0px !important; background-color: #F6F5E8 !important; }
         
-        /* 讓 data_editor 的 checkbox 更好看 */
+        /* 讓 checkbox 置中 */
         [data-testid="stCheckbox"] { display: flex; justify-content: center; }
         </style>
         """, unsafe_allow_html=True)
@@ -52,7 +55,7 @@ def load_data():
                 if col not in df.columns: df[col] = ""
             df = df.fillna("")
             
-            # 強制轉換數值與日期物件以便處理
+            # 強制轉換
             df["時數"] = pd.to_numeric(df["時數"], errors='coerce').fillna(0.0)
             df["日期_obj"] = pd.to_datetime(df["日期"], errors='coerce')
             df.loc[df["日期_obj"].isna(), "日期_obj"] = datetime(1900, 1, 1)
@@ -63,8 +66,7 @@ def load_data():
             df["類型"] = df["類型"].astype(str).str.strip()
             df["審核狀態"] = df["審核狀態"].replace("", "待審核")
             
-            # 建立一個唯一的 ID 欄位 (index)，確保刪除時不會錯亂
-            # 這裡不 reset_index，保留原始 csv 的 index，這樣刪除時才準
+            # 設定 ID
             if df.index.name != "id":
                 df.index.name = "id"
             
@@ -86,7 +88,7 @@ def save_data(df):
     except Exception as e:
         st.error(f"存檔失敗: {e}")
 
-# --- 彈出視窗 ---
+# --- 彈出視窗 (含複製文字) ---
 @st.dialog("申請確認")
 def success_dialog(name, apply_type, date_str, duration, note):
     st.markdown(f"""
@@ -96,14 +98,20 @@ def success_dialog(name, apply_type, date_str, duration, note):
     * **日期**: {date_str}
     * **時數**: {duration} 小時
     """)
-    if st.button("關閉"):
+    
+    st.markdown("👇 **點擊右上方複製，貼到群組：**")
+    
+    # 這裡產生您要的文字格式
+    copy_text = f"今天 {name} 有 {apply_type} {duration}小時"
+    st.code(copy_text, language=None)
+    
+    if st.button("關閉視窗"):
         st.rerun()
 
 # --- 主程式 ---
 def main():
     local_css()
     st.set_page_config(page_title="班表管理", page_icon=None, layout="wide") 
-    # layout="wide" 讓後台表格看起更寬敞
     
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
@@ -121,9 +129,17 @@ def main():
             name = c1.text_input("姓名 (請輸入全名)")
             input_date = c1.date_input("日期", datetime.today())
             apply_type = c2.selectbox("申請類型", ["加班", "抵班/補休"])
+            
             c3, c4 = st.columns(2)
-            start_time = c3.time_input("開始時間", datetime.strptime("09:00", "%H:%M").time())
-            end_time = c4.time_input("結束時間", datetime.strptime("18:00", "%H:%M").time())
+            
+            # [修改重點] 改用 selectbox 搭配 30分鐘間隔列表
+            # 預設選在 09:00 和 18:00，如果找不到就選第一個
+            def_start = "09:00" if "09:00" in TIME_OPTIONS else TIME_OPTIONS[0]
+            def_end = "18:00" if "18:00" in TIME_OPTIONS else TIME_OPTIONS[-1]
+            
+            start_time_str = c3.selectbox("開始時間", TIME_OPTIONS, index=TIME_OPTIONS.index(def_start))
+            end_time_str = c4.selectbox("結束時間", TIME_OPTIONS, index=TIME_OPTIONS.index(def_end))
+            
             note = st.text_area("備註 (選填)")
             
             submitted = st.form_submit_button("送出申請")
@@ -132,11 +148,15 @@ def main():
                 if not name:
                     st.error("請輸入姓名")
                 else:
+                    # 將字串轉回時間物件進行計算
+                    start_time = datetime.strptime(start_time_str, "%H:%M").time()
+                    end_time = datetime.strptime(end_time_str, "%H:%M").time()
+                    
                     start_dt = datetime.combine(input_date, start_time)
                     end_dt = datetime.combine(input_date, end_time)
                     
                     if end_dt <= start_dt:
-                        st.error("時間錯誤")
+                        st.error("時間錯誤：結束時間必須晚於開始時間")
                     else:
                         duration = round((end_dt - start_dt).total_seconds() / 3600, 1)
                         date_str_save = input_date.strftime("%Y-%m-%d")
@@ -146,8 +166,8 @@ def main():
                             "姓名": name, 
                             "類型": apply_type, 
                             "日期": date_str_save, 
-                            "開始時間": start_time.strftime("%H:%M"), 
-                            "結束時間": end_time.strftime("%H:%M"),
+                            "開始時間": start_time_str, # 直接存字串
+                            "結束時間": end_time_str,   # 直接存字串
                             "時數": duration, 
                             "備註": note, 
                             "審核狀態": "待審核", 
@@ -163,6 +183,7 @@ def main():
                         final_df = pd.concat([current_df, new_df], ignore_index=True)
                         save_data(final_df)
                         
+                        # 呼叫彈出視窗
                         success_dialog(name, apply_type, date_str_save, duration, note)
 
     st.markdown("---")
@@ -259,83 +280,66 @@ def main():
 
             st.markdown("---")
 
-            # --- 3. 批量管理與刪除紀錄 (主要修改區) ---
+            # --- 3. 批量管理與刪除紀錄 ---
             st.subheader("管理所有紀錄 (批量刪除)")
             
             with st.expander("🔎 篩選與管理", expanded=True):
                 # 3.1 篩選器
                 f_col1, f_col2 = st.columns(2)
                 
-                # 人員篩選 (多選)
+                # 人員篩選
                 all_names = list(df["姓名"].unique())
                 filter_names = f_col1.multiselect("篩選人員", all_names, default=all_names)
                 
                 # 日期範圍篩選
-                min_date = df["日期_obj"].min().date()
-                max_date = df["日期_obj"].max().date()
-                # 預設顯示最近一個月，避免資料太多
-                filter_date_range = f_col2.date_input(
-                    "篩選日期範圍", 
-                    (min_date, max_date)
-                )
+                try:
+                    min_date = df["日期_obj"].min().date()
+                    max_date = df["日期_obj"].max().date()
+                    filter_date_range = f_col2.date_input("篩選日期範圍", (min_date, max_date))
+                except:
+                    filter_date_range = []
 
                 # 3.2 套用篩選
-                # 先複製一份用來顯示
                 display_df = df.copy()
                 
-                # 篩選人名
                 if filter_names:
                     display_df = display_df[display_df["姓名"].isin(filter_names)]
                 
-                # 篩選日期
                 if isinstance(filter_date_range, tuple) and len(filter_date_range) == 2:
                     start_d, end_d = filter_date_range
                     mask = (display_df["日期_obj"].dt.date >= start_d) & (display_df["日期_obj"].dt.date <= end_d)
                     display_df = display_df[mask]
                 
-                # 排序 (最新的在上面)
                 try:
                     display_df = display_df.sort_values("提交時間", ascending=False)
                 except:
                     pass
 
                 # 3.3 準備編輯表格
-                # 加入一個 "勾選刪除" 欄位，預設為 False
                 display_df.insert(0, "勾選刪除", False)
                 
-                # 只顯示需要的欄位，隱藏技術欄位
                 show_cols = ["勾選刪除", "姓名", "類型", "日期", "時數", "審核狀態", "備註", "提交時間"]
                 
                 st.caption(f"共找到 {len(display_df)} 筆資料")
                 
-                # 使用 data_editor 讓使用者可以勾選
                 edited_df = st.data_editor(
                     display_df[show_cols],
                     column_config={
-                        "勾選刪除": st.column_config.CheckboxColumn(
-                            "刪除?",
-                            help="勾選後按下方紅色按鈕即可刪除",
-                            default=False,
-                        ),
+                        "勾選刪除": st.column_config.CheckboxColumn("刪除?", default=False),
                         "時數": st.column_config.NumberColumn(format="%.1f")
                     },
-                    disabled=["姓名", "類型", "日期", "時數", "審核狀態", "備註", "提交時間"], # 只允許修改 checkbox
+                    disabled=["姓名", "類型", "日期", "時數", "審核狀態", "備註", "提交時間"],
                     hide_index=True,
                     use_container_width=True
                 )
 
-                # 3.4 執行刪除按鈕
-                # 找出被勾選的行 (這是在 display_df 中的 index)
+                # 3.4 執行刪除
                 rows_to_delete = edited_df[edited_df["勾選刪除"] == True]
                 
                 if not rows_to_delete.empty:
                     st.warning(f"您已勾選 {len(rows_to_delete)} 筆資料準備刪除。")
                     if st.button("🗑️ 確認刪除勾選的資料", type="primary"):
-                        # 取得要刪除的原始索引 (Original Index)
-                        # 因為 display_df 是從 df copy 出來的，index 還是對應原始 df 的 index
                         delete_indices = rows_to_delete.index.tolist()
-                        
-                        # 從原始 df 中刪除
                         df = df.drop(delete_indices)
                         save_data(df)
                         st.success("刪除成功！")
