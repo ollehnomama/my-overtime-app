@@ -25,13 +25,15 @@ def local_css():
         [data-testid="stDataFrame"] { border: 1px solid #CCCCCC; }
         [data-testid="stDataFrame"] th { background-color: #E0DED0 !important; color: #333333 !important; }
         div[data-testid="stDialog"] { border-radius: 0px !important; background-color: #F6F5E8 !important; }
-        [data-testid="stCheckbox"] { display: flex; justify-content: center; }
-        section[data-testid="stSidebar"] > div { padding-top: 2rem; }
+        .stMarkdown h1 a, .stMarkdown h2 a, .stMarkdown h3 a { display: none !important; }
+        [data-testid="stToolbar"] { visibility: hidden; height: 0%; position: fixed; }
+        footer { visibility: hidden; }
         </style>
         """, unsafe_allow_html=True)
 
-# --- 資料讀取 ---
+# --- 資料讀取 (診斷版：錯誤會顯示出來) ---
 def load_data(conn):
+    # 1. 讀取紀錄
     record_cols = [
         "提交時間", "分店", "姓名", "員工編號", "類型", "日期", 
         "開始時間", "結束時間", "時數", "備註", 
@@ -39,6 +41,7 @@ def load_data(conn):
     ]
     try:
         df = conn.read(worksheet="Records", ttl=0)
+        df.columns = df.columns.str.strip() # 去除欄位空白
         for col in record_cols:
             if col not in df.columns: df[col] = ""
         df = df.fillna("")
@@ -51,17 +54,28 @@ def load_data(conn):
         
         df["類型"] = df["類型"].astype(str).str.strip()
         df["審核狀態"] = df["審核狀態"].replace("", "待審核")
-        
-    except:
+    except Exception as e:
+        # 如果讀取 Records 失敗，不要讓整個 App 掛掉，但要顯示警告
+        st.warning(f"無法讀取班表紀錄 (Records): {e}")
         df = pd.DataFrame(columns=record_cols)
 
+    # 2. 讀取使用者帳號
+    # 這裡的 Exception 非常重要，如果這裡掛了，絕對登不進去
     try:
         users_df = conn.read(worksheet="Users", ttl=0)
+        users_df.columns = users_df.columns.str.strip() # 去除欄位名稱的空白
         users_df = users_df.fillna("")
+        
+        # 強制轉型為字串
         for col in ["Account", "Password", "Name", "Role", "Store"]:
             if col in users_df.columns:
-                users_df[col] = users_df[col].astype(str).str.strip()
-    except:
+                # 轉字串 -> 去空白 -> 去除 .0
+                users_df[col] = users_df[col].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+            else:
+                st.error(f"⚠️ 您的 Google Sheet 'Users' 分頁缺少欄位: {col}")
+                
+    except Exception as e:
+        st.error(f"🔴 嚴重錯誤：無法讀取帳號表 (Users)。請檢查分頁名稱是否正確？錯誤訊息: {e}")
         users_df = pd.DataFrame(columns=["Account", "Password", "Name", "Role", "Store"])
 
     return df, users_df
@@ -85,10 +99,8 @@ def success_dialog(name, store, apply_type, date_str, start, end, duration, note
     * **分店**: {store}
     * **姓名**: {name}
     * **類型**: {apply_type}
-    * **時間**: {date_str} {start} ~ {end}
-    * **時數**: {duration} 小時
+    * **時段**: {start} ~ {end} ({duration}hr)
     """)
-    # 這裡加入時間區段
     copy_text = f"今天 {name} ({store}) 有 {apply_type} {start}~{end} 共{duration}小時\n原因:{note}"
     st.markdown("👇 **複製文字貼到群組：**")
     st.code(copy_text, language=None)
@@ -119,6 +131,11 @@ def main():
         c1, c2, c3 = st.columns([1, 2, 1])
         with c2:
             st.title("🔐 員工登入系統")
+            
+            # 顯示連線狀態
+            if users_df.empty:
+                st.error("⚠️ 警告：系統讀不到任何帳號資料，請檢查下方的【系統診斷】")
+                
             with st.container(border=True):
                 with st.form("login_form"):
                     input_acc = st.text_input("員工編號 / 帳號")
@@ -126,6 +143,7 @@ def main():
                     submitted = st.form_submit_button("登入", type="primary")
                     
                     if submitted:
+                        # 比對
                         user_record = users_df[
                             (users_df["Account"] == input_acc) & 
                             (users_df["Password"] == input_pwd)
@@ -135,15 +153,44 @@ def main():
                             user = user_record.iloc[0]
                             st.session_state.logged_in = True
                             st.session_state.user_id = user["Account"]
-                            st.session_state.user_name = user["Name"] if "Name" in user else user["Account"]
+                            st.session_state.user_name = user["Name"] if "Name" in user and user["Name"] else user["Account"]
                             st.session_state.user_role = user["Role"]
                             st.session_state.user_store = user["Store"]
                             st.rerun()
                         else:
                             st.error("帳號或密碼錯誤")
+
+            # === 🔧 診斷工具 (登不進去請點開這裡) ===
+            with st.expander("🔧 系統診斷 (如果登不進去，請截圖這畫面給工程師)"):
+                st.markdown("### 1. 系統讀到的帳號表 (前 5 筆)")
+                if users_df.empty:
+                    st.error("❌ 空的！系統完全沒讀到資料。請檢查：\n1. Google Sheet 分頁名稱是否為 'Users' (大小寫要一樣)\n2. Secrets 金鑰是否正確")
+                else:
+                    st.success(f"✅ 已讀取 {len(users_df)} 筆帳號")
+                    st.dataframe(users_df.head())
+                    st.markdown("### 2. 欄位名稱檢查")
+                    st.text(f"讀到的欄位: {list(users_df.columns)}")
+                    
+                    st.markdown("### 3. 您剛剛輸入的內容")
+                    st.text(f"帳號: '{input_acc}'")
+                    st.text(f"密碼: '{input_pwd}'")
+                    
+                    if not users_df.empty and input_acc:
+                        st.markdown("### 4. 比對結果")
+                        match_acc = users_df[users_df["Account"] == input_acc]
+                        if match_acc.empty:
+                            st.warning("❌ 找不到此帳號")
+                        else:
+                            st.success("✅ 找到帳號了！檢查密碼...")
+                            real_pwd = match_acc.iloc[0]["Password"]
+                            st.text(f"資料庫裡的密碼是: '{real_pwd}'")
+                            if real_pwd == input_pwd:
+                                st.success("✅ 密碼完全一致 (應該要能登入)")
+                            else:
+                                st.error("❌ 密碼不一致")
         return
 
-    # === Sidebar ===
+    # === 登入後畫面 ===
     with st.sidebar:
         st.title(f"Hi, {st.session_state.user_name}")
         st.caption(f"分店: {st.session_state.user_store}")
@@ -155,7 +202,7 @@ def main():
 
     st.title(f"⏰ 團隊時數管理 ({st.session_state.user_store})")
 
-    # === 員工介面 ===
+    # 角色邏輯
     if st.session_state.user_role == "Staff":
         st.subheader("📝 填寫申請單")
         with st.container(border=True):
@@ -173,7 +220,6 @@ def main():
                 def_end = "18:00" if "18:00" in TIME_OPTIONS else TIME_OPTIONS[-1]
                 start_time_str = c5.selectbox("開始時間", TIME_OPTIONS, index=TIME_OPTIONS.index(def_start))
                 end_time_str = c6.selectbox("結束時間", TIME_OPTIONS, index=TIME_OPTIONS.index(def_end))
-                
                 note = st.text_area("備註")
                 
                 if st.form_submit_button("送出申請", type="primary"):
@@ -187,7 +233,6 @@ def main():
                     else:
                         duration = round((end_dt - start_dt).total_seconds() / 3600, 1)
                         date_str = input_date.strftime("%Y-%m-%d")
-                        
                         new_row = {
                             "提交時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             "分店": st.session_state.user_store,
@@ -203,19 +248,16 @@ def main():
                             "審核時間": "",
                             "月份": input_date.strftime("%Y-%m")
                         }
-                        
                         curr_df, _ = load_data(conn)
                         if "日期_obj" in curr_df.columns: curr_df = curr_df.drop(columns=["日期_obj"])
                         new_df = pd.DataFrame([new_row])
                         final_df = pd.concat([curr_df, new_df], ignore_index=True)
                         save_data(conn, final_df)
-                        
                         success_dialog(st.session_state.user_name, st.session_state.user_store, apply_type, date_str, start_time_str, end_time_str, duration, note)
 
         st.subheader("📋 我的申請紀錄")
         my_records = df[df["員工編號"] == st.session_state.user_id]
         if not my_records.empty:
-            # 這裡把開始和結束時間加進去顯示
             show_cols = ["日期", "開始時間", "結束時間", "類型", "時數", "審核狀態", "備註"]
             st.dataframe(
                 my_records[show_cols].sort_values("日期", ascending=False).style.format({"時數": "{:.1f}"}),
@@ -225,7 +267,6 @@ def main():
         else:
             st.info("尚無申請紀錄")
 
-    # === 管理者介面 ===
     elif st.session_state.user_role in ["Manager", "Admin"]:
         if st.session_state.user_role == "Admin" or st.session_state.user_store == "All":
             view_df = df
@@ -243,19 +284,14 @@ def main():
         else:
             for idx, row in pending_df.iterrows():
                 with st.container():
-                    # 調整欄位寬度以容納時間
                     c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([1, 1, 1.5, 1.5, 1.5, 1, 0.8, 0.8])
                     c1.text(row['分店'])
                     c2.text(row['姓名'])
                     c3.text(row['日期'])
-                    # 這裡顯示詳細時間
                     c4.text(f"{row['開始時間']}~{row['結束時間']}")
                     c5.text(row['類型'])
-                    try:
-                        h_val = float(row['時數'])
-                        c6.text(f"{h_val:.1f}hr")
-                    except:
-                        c6.text(f"{row['時數']}")
+                    try: h_val = float(row['時數']); c6.text(f"{h_val:.1f}hr")
+                    except: c6.text(f"{row['時數']}")
                     
                     if c7.button("通過", key=f"p_{idx}"):
                         df.at[idx, "審核狀態"] = "已通過"
@@ -273,10 +309,8 @@ def main():
         try:
             valid_months = [m for m in view_df["月份"].unique() if m != "未知" and m != ""]
             months = sorted(valid_months, reverse=True)
-        except:
-            months = []
+        except: months = []
         sel_month = st.selectbox("月份", ["全部"] + months)
-        
         stat_source = view_df if sel_month == "全部" else view_df[view_df["月份"] == sel_month]
         stat_source = stat_source[stat_source["審核狀態"] == "已通過"]
         
@@ -299,7 +333,6 @@ def main():
             except: pass
             
             display_df.insert(0, "勾選", False)
-            # 在管理列表也加入時間欄位
             cols = ["勾選", "分店", "姓名", "日期", "開始時間", "結束時間", "類型", "時數", "審核狀態", "備註"]
             edited = st.data_editor(display_df[cols], column_config={"勾選": st.column_config.CheckboxColumn("刪除", default=False), "時數": st.column_config.NumberColumn(format="%.1f")}, disabled=["分店", "姓名", "日期", "開始時間", "結束時間", "類型", "時數", "審核狀態", "備註"], hide_index=True, use_container_width=True)
             to_del = edited[edited["勾選"]]
