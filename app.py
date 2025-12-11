@@ -5,8 +5,8 @@ import os
 
 # --- 設定檔案儲存路徑 ---
 DATA_FILE = "schedule_data.csv"
-# --- 設定管理員密碼 (請修改這裡) ---
-ADMIN_PASSWORD = "boss"  
+# --- 設定管理員密碼 (改從 Secrets 讀取) ---
+ADMIN_PASSWORD = st.secrets["admin_password"]
 
 # --- 初始化或讀取資料 ---
 def load_data():
@@ -135,4 +135,5 @@ def main():
     # 若沒輸入密碼，下面這一區塊完全不會顯示，達到隱私效果
 
 if __name__ == "__main__":
+
     main()
