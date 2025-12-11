@@ -31,7 +31,7 @@ def local_css():
         </style>
         """, unsafe_allow_html=True)
 
-# --- 資料讀取 (保留強力清潔功能，確保登入順暢) ---
+# --- 資料讀取 ---
 def load_data(conn):
     # 1. 讀取紀錄
     record_cols = [
@@ -58,7 +58,7 @@ def load_data(conn):
     except:
         df = pd.DataFrame(columns=record_cols)
 
-    # 2. 讀取使用者帳號 (關鍵修正：強制去除 .0)
+    # 2. 讀取使用者帳號
     try:
         users_df = conn.read(worksheet="Users", ttl=0)
         users_df.columns = users_df.columns.str.strip()
@@ -129,7 +129,17 @@ def main():
                 with st.form("login_form"):
                     input_acc = st.text_input("員工編號 / 帳號")
                     input_pwd = st.text_input("密碼", type="password")
-                    submitted = st.form_submit_button("登入", type="primary")
+                    
+                    # 使用 columns 讓按鈕排整齊
+                    b1, b2 = st.columns([1, 1])
+                    submitted = b1.form_submit_button("登入", type="primary")
+                    
+                    # [新增功能] 刷新按鈕：強制清除快取並重抓資料
+                    refresh = b2.form_submit_button("🔄 刷新資料庫")
+                    
+                    if refresh:
+                        st.cache_data.clear()
+                        st.rerun()
                     
                     if submitted:
                         user_record = users_df[
@@ -147,6 +157,8 @@ def main():
                             st.rerun()
                         else:
                             st.error("帳號或密碼錯誤")
+                            if users_df.empty:
+                                st.warning("提示：系統目前讀到的帳號名單是空的，請按『刷新資料庫』試試看。")
         return
 
     # === 登入後畫面 ===
