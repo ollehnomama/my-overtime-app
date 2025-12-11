@@ -12,7 +12,7 @@ if "admin_password" in st.secrets:
 else:
     ADMIN_PASSWORD = "boss"
 
-# --- Aesop 風格客製化 CSS (純文字極簡版) ---
+# --- Aesop 風格客製化 CSS ---
 def local_css():
     st.markdown("""
         <style>
@@ -28,7 +28,6 @@ def local_css():
 
         [data-testid="stSidebar"] { border-right: 1px solid #D0CDBC; background-color: #EAE8D9; }
         
-        /* 輸入框去背、細線條 */
         .stTextInput > div > div > input,
         .stDateInput > div > div > input,
         .stTimeInput > div > div > input,
@@ -40,7 +39,6 @@ def local_css():
             color: #333333 !important;
         }
 
-        /* 按鈕 Aesop 風格 */
         .stButton > button {
             background-color: transparent !important;
             color: #333333 !important;
@@ -54,9 +52,6 @@ def local_css():
             color: #F6F5E8 !important;
             border-color: #333333 !important;
         }
-        
-        /* 特別將「刪除」按鈕設為深紅色 hover */
-        /* 這裡使用 key 來區分不太容易，統一風格即可，或依靠文字內容 (CSS較難選取) */
 
         div[data-testid="stAlert"] { 
             background-color: transparent !important; 
@@ -96,11 +91,13 @@ def load_data():
             df["審核狀態"] = df["審核狀態"].fillna("待審核")
             df["審核時間"] = df["審核時間"].fillna("")
 
-            # 修正舊資料名稱
+            # 儘量統一資料名稱，讓列表好看一點
             df["類型"] = df["類型"].replace({
                 "加班 (Overtime)": "加班",
                 "抵班/補休 (Comp Time)": "抵班/補休"
             })
+            # 去除可能存在的空白
+            df["類型"] = df["類型"].astype(str).str.strip()
 
             df["日期"] = pd.to_datetime(df["日期"], errors='coerce')
             df = df.dropna(subset=["日期"])
@@ -168,7 +165,8 @@ def main():
                         }
                         df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
                         save_data(df)
-                        st.success(f"已送出！狀態：待審核")
+                        st.success("已送出！請通知管理員審核。")
+                        st.rerun()
 
     st.markdown("---")
 
@@ -181,7 +179,7 @@ def main():
         st.header("管理員報表")
 
         if not df.empty:
-            # --- 待審核區 (新增刪除按鈕) ---
+            # --- 待審核區 ---
             st.subheader("待審核項目")
             pending_df = df[df["審核狀態"] == "待審核"]
             
@@ -190,7 +188,6 @@ def main():
             else:
                 for index, row in pending_df.iterrows():
                     with st.container():
-                        # 調整欄位比例，讓按鈕好放
                         c1, c2, c3, c4, c5, c6 = st.columns([1.5, 2, 2, 1, 0.8, 0.8])
                         c1.text(f"{row['姓名']}")
                         try:
@@ -201,14 +198,12 @@ def main():
                         c3.text(f"{row['類型']}")
                         c4.text(f"{row['時數']}")
                         
-                        # 通過按鈕
                         if c5.button("通過", key=f"pass_{index}"):
                             df.at[index, "審核狀態"] = "已通過"
                             df.at[index, "審核時間"] = datetime.now().strftime("%Y-%m-%d %H:%M")
                             save_data(df)
                             st.rerun()
-                        
-                        # 刪除按鈕 (拒絕)
+
                         if c6.button("刪除", key=f"del_{index}"):
                             df = df.drop(index)
                             save_data(df)
@@ -230,19 +225,42 @@ def main():
                 filtered_df = df[df["月份"] == selected_month]
                 st.caption(f"目前顯示：{selected_month} 月份資料")
 
-            # --- 統計區 ---
+            # --- 統計區 (改用超強容錯計算) ---
             st.subheader("人員時數統計 (已通過)")
+            
+            # 1. 篩選已通過
             approved_df = filtered_df[filtered_df["審核狀態"] == "已通過"]
-            summary = approved_df.groupby(['姓名', '類型'])['時數'].sum().unstack(fill_value=0)
             
-            for col in ["加班", "抵班/補休"]:
-                if col not in summary.columns: summary[col] = 0.0
+            # 2. 準備統計資料容器
+            stats_list = []
+            
+            if not approved_df.empty:
+                # 取得所有人名
+                all_names = approved_df["姓名"].unique()
+                
+                for person in all_names:
+                    # 抓出這個人的所有資料
+                    person_data = approved_df[approved_df["姓名"] == person]
+                    
+                    # 模糊搜尋：只要類型字串裡包含 "加班" 就算加班，包含 "補休" 就算抵休
+                    # 這樣可以通吃 "加班", "加班 (Overtime)", "抵班/補休", "抵班/補休 (Comp Time)"
+                    ot_hours = person_data[person_data["類型"].str.contains("加班", na=False)]["時數"].sum()
+                    comp_hours = person_data[person_data["類型"].str.contains("補休", na=False)]["時數"].sum()
+                    
+                    stats_list.append({
+                        "姓名": person,
+                        "加班總時數": ot_hours,
+                        "已抵休時數": comp_hours,
+                        "小計/餘額": ot_hours - comp_hours
+                    })
+                
+                summary_df = pd.DataFrame(stats_list)
+            else:
+                summary_df = pd.DataFrame(columns=["姓名", "加班總時數", "已抵休時數", "小計/餘額"])
 
-            summary = summary.rename(columns={"加班": "加班總時數", "抵班/補休": "已抵休時數"})
-            summary["小計/餘額"] = summary["加班總時數"] - summary["已抵休時數"]
-            
+            # 顯示統計表
             st.dataframe(
-                summary.style.format("{:.1f}")
+                summary_df.style.format("{:.1f}", subset=["加班總時數", "已抵休時數", "小計/餘額"])
                 .map(lambda x: 'color: #A03C3C' if x < 0 else 'color: #4A5D23', subset=['小計/餘額']),
                 use_container_width=True
             )
@@ -267,19 +285,19 @@ def main():
                 .map(lambda v: 'color: #4A5D23; font-weight: bold' if v == '已通過' else 'color: #999999', subset=['審核狀態']),
                 use_container_width=True
             )
-            
+
             st.markdown("---")
 
-            # --- 新增功能：刪除歷史紀錄 ---
+            # --- 刪除/管理歷史資料區 ---
             with st.expander("🗑️ 刪除/管理歷史資料"):
                 st.caption("請小心操作，刪除後無法復原。")
-                
-                # 製作一個讓老闆好選的清單： [ID] 姓名 - 日期 - 類型 - 時數
-                # 為了避免 index 跑掉，我們直接用 iterrows 產生選項
                 delete_options = {}
-                # 這裡顯示所有資料(或是 filtered_df 也可以，目前顯示所有比較安全)
+                # 這裡顯示所有資料方便管理，不隨月份篩選變動
                 for idx, row in df.sort_values("提交時間", ascending=False).iterrows():
-                    d_str = row['日期'].strftime('%Y-%m-%d') if isinstance(row['日期'], pd.Timestamp) else str(row['日期'])
+                    try:
+                        d_str = row['日期'].strftime('%Y-%m-%d') if isinstance(row['日期'], pd.Timestamp) else str(row['日期'])
+                    except:
+                        d_str = str(row['日期'])
                     label = f"[{idx}] {row['姓名']} | {d_str} | {row['類型']} ({row['時數']}hr) - {row['審核狀態']}"
                     delete_options[label] = idx
                 
@@ -287,7 +305,6 @@ def main():
                     st.text("無資料可刪除")
                 else:
                     selected_label = st.selectbox("請選擇要刪除的資料", options=list(delete_options.keys()))
-                    
                     if st.button("確認刪除此筆資料"):
                         delete_idx = delete_options[selected_label]
                         df = df.drop(delete_idx)
