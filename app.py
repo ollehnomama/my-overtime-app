@@ -101,8 +101,9 @@ def success_dialog(name, apply_type, date_str, duration, note):
     
     st.markdown("👇 **點擊右上方複製，貼到群組：**")
     
-    # 這裡產生您要的文字格式
-    copy_text = f"今天 {name} 有 {apply_type} {duration}小時"
+    # [修改重點] 這裡改成您要求的格式：今天 [姓名] 有 [類型] [時數]小時 \n 原因:(備註)
+    copy_text = f"今天 {name} 有 {apply_type} {duration}小時\n原因:{note}"
+    
     st.code(copy_text, language=None)
     
     if st.button("關閉視窗"):
@@ -132,8 +133,7 @@ def main():
             
             c3, c4 = st.columns(2)
             
-            # [修改重點] 改用 selectbox 搭配 30分鐘間隔列表
-            # 預設選在 09:00 和 18:00，如果找不到就選第一個
+            # 使用 30 分鐘間隔列表
             def_start = "09:00" if "09:00" in TIME_OPTIONS else TIME_OPTIONS[0]
             def_end = "18:00" if "18:00" in TIME_OPTIONS else TIME_OPTIONS[-1]
             
@@ -148,7 +148,6 @@ def main():
                 if not name:
                     st.error("請輸入姓名")
                 else:
-                    # 將字串轉回時間物件進行計算
                     start_time = datetime.strptime(start_time_str, "%H:%M").time()
                     end_time = datetime.strptime(end_time_str, "%H:%M").time()
                     
@@ -166,8 +165,8 @@ def main():
                             "姓名": name, 
                             "類型": apply_type, 
                             "日期": date_str_save, 
-                            "開始時間": start_time_str, # 直接存字串
-                            "結束時間": end_time_str,   # 直接存字串
+                            "開始時間": start_time_str,
+                            "結束時間": end_time_str,
                             "時數": duration, 
                             "備註": note, 
                             "審核狀態": "待審核", 
@@ -183,7 +182,6 @@ def main():
                         final_df = pd.concat([current_df, new_df], ignore_index=True)
                         save_data(final_df)
                         
-                        # 呼叫彈出視窗
                         success_dialog(name, apply_type, date_str_save, duration, note)
 
     st.markdown("---")
@@ -252,7 +250,6 @@ def main():
             col_filter1, col_filter2 = st.columns(2)
             selected_month = col_filter1.selectbox("選擇月份", ["全部"] + all_months)
             
-            # 統計資料計算
             if selected_month == "全部":
                 stat_source_df = df
             else:
@@ -284,14 +281,11 @@ def main():
             st.subheader("管理所有紀錄 (批量刪除)")
             
             with st.expander("🔎 篩選與管理", expanded=True):
-                # 3.1 篩選器
+                # 篩選器
                 f_col1, f_col2 = st.columns(2)
-                
-                # 人員篩選
                 all_names = list(df["姓名"].unique())
                 filter_names = f_col1.multiselect("篩選人員", all_names, default=all_names)
                 
-                # 日期範圍篩選
                 try:
                     min_date = df["日期_obj"].min().date()
                     max_date = df["日期_obj"].max().date()
@@ -299,7 +293,7 @@ def main():
                 except:
                     filter_date_range = []
 
-                # 3.2 套用篩選
+                # 套用篩選
                 display_df = df.copy()
                 
                 if filter_names:
@@ -315,9 +309,8 @@ def main():
                 except:
                     pass
 
-                # 3.3 準備編輯表格
+                # 準備編輯表格
                 display_df.insert(0, "勾選刪除", False)
-                
                 show_cols = ["勾選刪除", "姓名", "類型", "日期", "時數", "審核狀態", "備註", "提交時間"]
                 
                 st.caption(f"共找到 {len(display_df)} 筆資料")
@@ -333,7 +326,6 @@ def main():
                     use_container_width=True
                 )
 
-                # 3.4 執行刪除
                 rows_to_delete = edited_df[edited_df["勾選刪除"] == True]
                 
                 if not rows_to_delete.empty:
