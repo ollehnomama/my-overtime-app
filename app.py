@@ -12,7 +12,7 @@ if "admin_password" in st.secrets:
 else:
     ADMIN_PASSWORD = "boss"
 
-# --- CSS ---
+# --- Aesop 風格 CSS ---
 def local_css():
     st.markdown("""
         <style>
@@ -30,12 +30,11 @@ def local_css():
         div[data-testid="stAlert"] { background-color: transparent !important; border-radius: 0px !important; }
         [data-testid="stDataFrame"] { border: 1px solid #CCCCCC; }
         [data-testid="stDataFrame"] th { background-color: #E0DED0 !important; color: #333333 !important; }
-        [data-testid="stDecoration"] { display: none; }
         div[data-testid="stDialog"] { border-radius: 0px !important; background-color: #F6F5E8 !important; }
         </style>
         """, unsafe_allow_html=True)
 
-# --- 資料讀取 (修復版) ---
+# --- 資料讀取 (絕對顯示版) ---
 def load_data():
     columns = [
         "提交時間", "姓名", "類型", "日期", 
@@ -45,40 +44,51 @@ def load_data():
 
     if os.path.exists(DATA_FILE):
         try:
-            df = pd.read_csv(DATA_FILE, encoding='utf-8-sig')
+            # 1. 全部當作字串讀取，避免 Pandas 猜錯型別導致資料遺失
+            df = pd.read_csv(DATA_FILE, encoding='utf-8-sig', dtype=str)
+            
+            # 2. 補齊欄位
             for col in columns:
                 if col not in df.columns: df[col] = ""
             
-            # 填補空值
-            df["審核狀態"] = df["審核狀態"].fillna("待審核")
+            # 3. 填補空值 (顯示為空字串，而不是消失)
+            df = df.fillna("")
+            
+            # 4. 強制轉換「時數」為數字 (計算用)
+            # errors='coerce' 會把無法轉成數字的變成 0，但行不會消失
+            df["時數"] = pd.to_numeric(df["時數"], errors='coerce').fillna(0.0)
+            
+            # 5. 處理日期 (只為了排序和月份篩選，不影響原始顯示)
+            # 建立一個臨時的日期物件欄位用來排序
+            df["日期_obj"] = pd.to_datetime(df["日期"], errors='coerce')
+            
+            # 如果日期爛掉了，補一個預設值讓我們找得到它
+            df.loc[df["日期_obj"].isna(), "日期_obj"] = datetime(1900, 1, 1)
+            
+            # 產生月份 (如果日期爛掉，月份設為 "未知")
+            df["月份"] = df["日期_obj"].dt.strftime("%Y-%m")
+            df.loc[df["月份"] == "1900-01", "月份"] = "未知/錯誤"
+
+            # 6. 整理文字
             df["類型"] = df["類型"].astype(str).str.strip()
+            df["審核狀態"] = df["審核狀態"].replace("", "待審核")
+
+            # ⚠️ 絕對不執行 dropna()，保留所有資料
             
-            # --- 關鍵修正：更寬容的日期讀取 ---
-            # 如果日期讀取失敗，不要刪除整行，而是保留原字串，讓我們看看到底發生什麼事
-            df["日期_原始"] = df["日期"] # 備份原始資料供檢查
-            df["日期"] = pd.to_datetime(df["日期"], errors='coerce')
-            
-            # 如果日期轉換失敗 (NaT)，我們暫時填入今天的日期，避免資料消失
-            # 這樣至少您在後台看得到那筆資料，可以手動刪除重來
-            if df["日期"].isna().any():
-                df["日期"] = df["日期"].fillna(datetime.today())
-                
-            df["月份"] = df["日期"].dt.strftime("%Y-%m")
-            df = df.reset_index(drop=True)
             return df
         except Exception as e:
-            # 如果讀取徹底失敗，顯示錯誤
-            st.error(f"資料讀取嚴重錯誤: {e}")
+            st.error(f"資料讀取錯誤: {e}")
             return pd.DataFrame(columns=columns)
     else:
         return pd.DataFrame(columns=columns)
 
 def save_data(df):
     try:
-        # 移除暫存的備份欄位再存檔
-        if "日期_原始" in df.columns:
-            df = df.drop(columns=["日期_原始"])
-        df.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
+        # 存檔前移除我們剛剛產生的臨時欄位
+        df_save = df.copy()
+        if "日期_obj" in df_save.columns:
+            df_save = df_save.drop(columns=["日期_obj"])
+        df_save.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
     except Exception as e:
         st.error(f"存檔失敗: {e}")
 
@@ -87,15 +97,12 @@ def save_data(df):
 def success_dialog(name, apply_type, date_str, duration, note):
     st.markdown(f"""
     **✅ 申請成功！**
-    
     * **姓名**: {name}
     * **類型**: {apply_type}
     * **日期**: {date_str}
     * **時數**: {duration} 小時
-    
-    資料已寫入資料庫，請通知管理員。
     """)
-    if st.button("我知道了 (關閉)"):
+    if st.button("關閉"):
         st.rerun()
 
 # --- 主程式 ---
@@ -108,11 +115,11 @@ def main():
 
     st.title("團隊時數管理系統")
 
+    # 讀取資料
     df = load_data()
 
     # === 員工申請區 ===
     st.markdown("### 員工申請區")
-    
     with st.container(border=True):
         st.caption("填寫表單")
         with st.form("application_form", clear_on_submit=True):
@@ -135,29 +142,38 @@ def main():
                     end_dt = datetime.combine(date, end_time)
                     
                     if end_dt <= start_dt:
-                        st.error("結束時間必須晚於開始時間")
+                        st.error("時間錯誤")
                     else:
                         duration = round((end_dt - start_dt).total_seconds() / 3600, 1)
-                        
-                        # --- 關鍵修正：存檔前強制把日期轉成字串 ---
-                        # 這樣存進 CSV 就是純文字 "2025-12-12"，讀取時絕對不會錯
-                        date_str_for_save = date.strftime("%Y-%m-%d")
+                        date_str_save = date.strftime("%Y-%m-%d")
                         
                         new_row = {
                             "提交時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "姓名": name, "類型": apply_type, 
-                            "日期": date_str_for_save, # 這裡存純文字
-                            "開始時間": start_time.strftime("%H:%M"), "結束時間": end_time.strftime("%H:%M"),
-                            "時數": duration, "備註": note, "審核狀態": "待審核", "審核時間": "",
+                            "姓名": name, 
+                            "類型": apply_type, 
+                            "日期": date_str_save, 
+                            "開始時間": start_time.strftime("%H:%M"), 
+                            "結束時間": end_time.strftime("%H:%M"),
+                            "時數": duration, 
+                            "備註": note, 
+                            "審核狀態": "待審核", 
+                            "審核時間": "",
                             "月份": date.strftime("%Y-%m")
                         }
                         
-                        # 重新讀取一次最新的 df 再寫入，避免多人同時操作時覆蓋
+                        # 重新讀取最新的 df 再寫入
                         current_df = load_data()
-                        current_df = pd.concat([current_df, pd.DataFrame([new_row])], ignore_index=True)
-                        save_data(current_df)
+                        # 轉成 DataFrame 並合併
+                        new_df = pd.DataFrame([new_row])
                         
-                        success_dialog(name, apply_type, date_str_for_save, duration, note)
+                        # 確保 columns 一致 (避免 append warning)
+                        if not current_df.empty and "日期_obj" in current_df.columns:
+                             current_df = current_df.drop(columns=["日期_obj"])
+
+                        final_df = pd.concat([current_df, new_df], ignore_index=True)
+                        save_data(final_df)
+                        
+                        success_dialog(name, apply_type, date_str_save, duration, note)
 
     st.markdown("---")
 
@@ -181,9 +197,11 @@ def main():
         st.header("管理員報表")
 
         if not df.empty:
-            # 1. 待審核
+            # 1. 待審核區
             st.subheader("待審核項目")
-            pending_df = df[df["審核狀態"] == "待審核"]
+            # 寬鬆篩選：只要狀態包含 "待審核" 或者 是空的，都顯示出來
+            pending_mask = df["審核狀態"].str.contains("待審核", na=False) | (df["審核狀態"] == "")
+            pending_df = df[pending_mask]
             
             if pending_df.empty:
                 st.info("無待審核項目")
@@ -192,14 +210,7 @@ def main():
                     with st.container():
                         c1, c2, c3, c4, c5, c6 = st.columns([1.5, 2, 2, 1, 0.8, 0.8])
                         c1.text(f"{row['姓名']}")
-                        
-                        # 安全顯示日期
-                        try:
-                            d_str = row['日期'].strftime('%Y-%m-%d') if isinstance(row['日期'], pd.Timestamp) else str(row['日期'])
-                        except:
-                            d_str = str(row['日期'])
-                            
-                        c2.text(d_str)
+                        c2.text(f"{row['日期']}") # 直接顯示原始文字，不轉換格式以免報錯
                         c3.text(f"{row['類型']}")
                         c4.text(f"{row['時數']}")
                         
@@ -216,17 +227,22 @@ def main():
 
             st.markdown("---")
 
-            # 2. 統計
+            # 2. 統計報表
             st.subheader("報表篩選")
-            
-            # 安全取得月份列表
             try:
-                all_months = sorted(df["月份"].dropna().unique().tolist(), reverse=True)
+                # 只取有意義的月份
+                valid_months = [m for m in df["月份"].unique() if m != "未知/錯誤" and m != ""]
+                all_months = sorted(valid_months, reverse=True)
             except:
                 all_months = []
                 
             selected_month = st.selectbox("選擇月份", ["全部"] + all_months)
-            filtered_df = df if selected_month == "全部" else df[df["月份"] == selected_month]
+            
+            # 篩選邏輯
+            if selected_month == "全部":
+                filtered_df = df
+            else:
+                filtered_df = df[df["月份"] == selected_month]
             
             st.subheader("人員時數統計 (已通過)")
             approved_df = filtered_df[filtered_df["審核狀態"] == "已通過"]
@@ -234,10 +250,14 @@ def main():
             stats = []
             if not approved_df.empty:
                 for p in approved_df["姓名"].unique():
+                    if not p: continue # 跳過空白名字
                     p_data = approved_df[approved_df["姓名"] == p]
-                    # 使用更寬容的包含搜尋
+                    
+                    # 寬鬆匹配：只要類型文字裡面有 "加班" 就算
                     ot = p_data[p_data["類型"].str.contains("加班", na=False)]["時數"].sum()
-                    comp = p_data[p_data["類型"].str.contains("補休", na=False)]["時數"].sum()
+                    # 寬鬆匹配：只要類型文字裡面有 "補休" 或 "抵班" 就算
+                    comp = p_data[p_data["類型"].str.contains("補休|抵班", regex=True, na=False)]["時數"].sum()
+                    
                     stats.append({"姓名": p, "加班總時數": ot, "已抵休時數": comp, "小計/餘額": ot - comp})
                 stat_df = pd.DataFrame(stats)
             else:
@@ -251,31 +271,36 @@ def main():
 
             # 3. 歷史明細
             st.subheader("申請明細列表")
-            filter_person = st.selectbox("篩選員工", ["全部"] + list(df["姓名"].unique()))
-            view_df = filtered_df[filtered_df["姓名"] == filter_person] if filter_person != "全部" else filtered_df
+            # 排除空白名字
+            unique_names = [n for n in df["姓名"].unique() if n]
+            filter_person = st.selectbox("篩選員工", ["全部"] + list(unique_names))
             
-            view_disp = view_df.copy()
-            if not view_disp.empty:
-                view_disp["日期"] = view_disp["日期"].apply(lambda x: x.strftime('%Y-%m-%d') if isinstance(x, pd.Timestamp) else str(x))
+            view_df = filtered_df
+            if filter_person != "全部":
+                view_df = view_df[view_df["姓名"] == filter_person]
+            
+            # 顯示時排序
+            try:
+                view_df = view_df.sort_values("提交時間", ascending=False)
+            except:
+                pass # 如果時間格式爛掉就不排序，直接顯示
+                
+            # 只顯示需要的欄位，且不進行複雜格式化以免報錯
+            display_cols = ["提交時間", "姓名", "類型", "日期", "開始時間", "結束時間", "時數", "備註", "審核狀態"]
+            # 確保欄位存在
+            final_cols = [c for c in display_cols if c in view_df.columns]
             
             st.dataframe(
-                view_disp.sort_values("提交時間", ascending=False)
-                .style.format({"時數": "{:.1f}"})
-                .map(lambda v: 'color: #4A5D23; font-weight: bold' if v == '已通過' else 'color: #999999', subset=['審核狀態']),
+                view_df[final_cols].style.map(lambda v: 'color: #4A5D23; font-weight: bold' if v == '已通過' else 'color: #999999', subset=['審核狀態']),
                 use_container_width=True
             )
-            
+
             # 4. 刪除工具
             st.markdown("---")
             with st.expander("🗑️ 刪除歷史資料"):
                 opts = {}
                 for i, r in df.sort_values("提交時間", ascending=False).iterrows():
-                    # 安全獲取日期字串
-                    try:
-                        d_show = r['日期'].strftime('%Y-%m-%d') if isinstance(r['日期'], pd.Timestamp) else str(r['日期'])
-                    except:
-                        d_show = "日期錯誤"
-                    opts[f"[{i}] {r['姓名']} {d_show} {r['類型']}"] = i
+                    opts[f"[{i}] {r['姓名']} {r['日期']} {r['類型']}"] = i
                 
                 if opts:
                     sel = st.selectbox("選擇刪除項目", list(opts.keys()))
@@ -287,10 +312,9 @@ def main():
                 else:
                     st.text("無資料")
                     
-            # 5. 除錯專用 (如果資料還是消失，請看這裡)
-            with st.expander("🔧 資料庫原始視圖 (除錯用)"):
-                st.caption("如果資料有進來，這裡一定看得到。")
-                st.dataframe(df)
+            # 5. 除錯區
+            with st.expander("🔧 資料庫原始視圖 (如果上面沒顯示，這裡一定有)"):
+                st.write(df)
 
         else:
             st.info("尚無資料")
