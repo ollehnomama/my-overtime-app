@@ -31,7 +31,7 @@ def local_css():
         </style>
         """, unsafe_allow_html=True)
 
-# --- 資料讀取 (診斷版：錯誤會顯示出來) ---
+# --- 資料讀取 (保留強力清潔功能，確保登入順暢) ---
 def load_data(conn):
     # 1. 讀取紀錄
     record_cols = [
@@ -41,7 +41,7 @@ def load_data(conn):
     ]
     try:
         df = conn.read(worksheet="Records", ttl=0)
-        df.columns = df.columns.str.strip() # 去除欄位空白
+        df.columns = df.columns.str.strip()
         for col in record_cols:
             if col not in df.columns: df[col] = ""
         df = df.fillna("")
@@ -54,28 +54,21 @@ def load_data(conn):
         
         df["類型"] = df["類型"].astype(str).str.strip()
         df["審核狀態"] = df["審核狀態"].replace("", "待審核")
-    except Exception as e:
-        # 如果讀取 Records 失敗，不要讓整個 App 掛掉，但要顯示警告
-        st.warning(f"無法讀取班表紀錄 (Records): {e}")
+        
+    except:
         df = pd.DataFrame(columns=record_cols)
 
-    # 2. 讀取使用者帳號
-    # 這裡的 Exception 非常重要，如果這裡掛了，絕對登不進去
+    # 2. 讀取使用者帳號 (關鍵修正：強制去除 .0)
     try:
         users_df = conn.read(worksheet="Users", ttl=0)
-        users_df.columns = users_df.columns.str.strip() # 去除欄位名稱的空白
+        users_df.columns = users_df.columns.str.strip()
         users_df = users_df.fillna("")
         
-        # 強制轉型為字串
         for col in ["Account", "Password", "Name", "Role", "Store"]:
             if col in users_df.columns:
-                # 轉字串 -> 去空白 -> 去除 .0
                 users_df[col] = users_df[col].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
-            else:
-                st.error(f"⚠️ 您的 Google Sheet 'Users' 分頁缺少欄位: {col}")
                 
-    except Exception as e:
-        st.error(f"🔴 嚴重錯誤：無法讀取帳號表 (Users)。請檢查分頁名稱是否正確？錯誤訊息: {e}")
+    except:
         users_df = pd.DataFrame(columns=["Account", "Password", "Name", "Role", "Store"])
 
     return df, users_df
@@ -132,10 +125,6 @@ def main():
         with c2:
             st.title("🔐 員工登入系統")
             
-            # 顯示連線狀態
-            if users_df.empty:
-                st.error("⚠️ 警告：系統讀不到任何帳號資料，請檢查下方的【系統診斷】")
-                
             with st.container(border=True):
                 with st.form("login_form"):
                     input_acc = st.text_input("員工編號 / 帳號")
@@ -143,7 +132,6 @@ def main():
                     submitted = st.form_submit_button("登入", type="primary")
                     
                     if submitted:
-                        # 比對
                         user_record = users_df[
                             (users_df["Account"] == input_acc) & 
                             (users_df["Password"] == input_pwd)
@@ -159,35 +147,6 @@ def main():
                             st.rerun()
                         else:
                             st.error("帳號或密碼錯誤")
-
-            # === 🔧 診斷工具 (登不進去請點開這裡) ===
-            with st.expander("🔧 系統診斷 (如果登不進去，請截圖這畫面給工程師)"):
-                st.markdown("### 1. 系統讀到的帳號表 (前 5 筆)")
-                if users_df.empty:
-                    st.error("❌ 空的！系統完全沒讀到資料。請檢查：\n1. Google Sheet 分頁名稱是否為 'Users' (大小寫要一樣)\n2. Secrets 金鑰是否正確")
-                else:
-                    st.success(f"✅ 已讀取 {len(users_df)} 筆帳號")
-                    st.dataframe(users_df.head())
-                    st.markdown("### 2. 欄位名稱檢查")
-                    st.text(f"讀到的欄位: {list(users_df.columns)}")
-                    
-                    st.markdown("### 3. 您剛剛輸入的內容")
-                    st.text(f"帳號: '{input_acc}'")
-                    st.text(f"密碼: '{input_pwd}'")
-                    
-                    if not users_df.empty and input_acc:
-                        st.markdown("### 4. 比對結果")
-                        match_acc = users_df[users_df["Account"] == input_acc]
-                        if match_acc.empty:
-                            st.warning("❌ 找不到此帳號")
-                        else:
-                            st.success("✅ 找到帳號了！檢查密碼...")
-                            real_pwd = match_acc.iloc[0]["Password"]
-                            st.text(f"資料庫裡的密碼是: '{real_pwd}'")
-                            if real_pwd == input_pwd:
-                                st.success("✅ 密碼完全一致 (應該要能登入)")
-                            else:
-                                st.error("❌ 密碼不一致")
         return
 
     # === 登入後畫面 ===
