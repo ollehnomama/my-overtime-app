@@ -7,10 +7,12 @@ import os
 DATA_FILE = "schedule_data.csv"
 
 # --- 讀取密碼 (優先讀取金庫 Secrets，若無則用預設值方便測試) ---
-try:
+# 舊寫法有防呆，會導致誤會。改成下面這樣，強制讀取金庫：
+if "admin_password" in st.secrets:
     ADMIN_PASSWORD = st.secrets["admin_password"]
-except Exception:
-    ADMIN_PASSWORD = "boss"  # 這是預設密碼，防止您在本地測試時報錯
+else:
+    st.error("🚨 錯誤：找不到密碼設定！請檢查 Secrets 裡的變數名稱是否為 admin_password")
+    st.stop() # 停止執行，避免用錯誤密碼繼續跑
 
 # --- Aesop 風格客製化 CSS ---
 def local_css():
@@ -221,3 +223,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
