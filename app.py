@@ -31,7 +31,7 @@ def local_css():
         </style>
         """, unsafe_allow_html=True)
 
-# --- 資料讀取 ---
+# --- 資料讀取 (診斷版) ---
 def load_data(conn):
     # 1. 讀取紀錄
     record_cols = [
@@ -41,7 +41,7 @@ def load_data(conn):
     ]
     try:
         df = conn.read(worksheet="Records", ttl=0)
-        df.columns = df.columns.str.strip()
+        df.columns = df.columns.str.strip() # 去除欄位空白
         for col in record_cols:
             if col not in df.columns: df[col] = ""
         df = df.fillna("")
@@ -61,15 +61,20 @@ def load_data(conn):
     # 2. 讀取使用者帳號
     try:
         users_df = conn.read(worksheet="Users", ttl=0)
-        users_df.columns = users_df.columns.str.strip()
+        # 關鍵：先把欄位名稱印出來檢查
+        users_df.columns = users_df.columns.str.strip() 
         users_df = users_df.fillna("")
         
+        # 強制全部轉字串，不管它是什麼鬼
+        # 並且再次執行去除 .0 的操作
         for col in ["Account", "Password", "Name", "Role", "Store"]:
             if col in users_df.columns:
                 users_df[col] = users_df[col].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
                 
-    except:
-        users_df = pd.DataFrame(columns=["Account", "Password", "Name", "Role", "Store"])
+    except Exception as e:
+        # 如果這裡報錯，會在診斷區顯示
+        users_df = pd.DataFrame()
+        st.session_state.error_log = str(e)
 
     return df, users_df
 
@@ -111,6 +116,7 @@ def main():
         st.session_state.user_name = ""
         st.session_state.user_role = ""
         st.session_state.user_store = ""
+        st.session_state.error_log = ""
 
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
@@ -124,17 +130,13 @@ def main():
         c1, c2, c3 = st.columns([1, 2, 1])
         with c2:
             st.title("🔐 員工登入系統")
-            
             with st.container(border=True):
                 with st.form("login_form"):
                     input_acc = st.text_input("員工編號 / 帳號")
                     input_pwd = st.text_input("密碼", type="password")
                     
-                    # 使用 columns 讓按鈕排整齊
                     b1, b2 = st.columns([1, 1])
                     submitted = b1.form_submit_button("登入", type="primary")
-                    
-                    # [新增功能] 刷新按鈕：強制清除快取並重抓資料
                     refresh = b2.form_submit_button("🔄 刷新資料庫")
                     
                     if refresh:
@@ -142,23 +144,63 @@ def main():
                         st.rerun()
                     
                     if submitted:
-                        user_record = users_df[
-                            (users_df["Account"] == input_acc) & 
-                            (users_df["Password"] == input_pwd)
-                        ]
-                        
-                        if not user_record.empty:
-                            user = user_record.iloc[0]
-                            st.session_state.logged_in = True
-                            st.session_state.user_id = user["Account"]
-                            st.session_state.user_name = user["Name"] if "Name" in user and user["Name"] else user["Account"]
-                            st.session_state.user_role = user["Role"]
-                            st.session_state.user_store = user["Store"]
-                            st.rerun()
+                        # 比對
+                        if "Account" in users_df.columns and "Password" in users_df.columns:
+                            # 這裡不做模糊比對，精確比對
+                            user_record = users_df[
+                                (users_df["Account"] == input_acc) & 
+                                (users_df["Password"] == input_pwd)
+                            ]
+                            
+                            if not user_record.empty:
+                                user = user_record.iloc[0]
+                                st.session_state.logged_in = True
+                                st.session_state.user_id = user["Account"]
+                                st.session_state.user_name = user["Name"] if "Name" in user and user["Name"] else user["Account"]
+                                st.session_state.user_role = user["Role"]
+                                st.session_state.user_store = user["Store"]
+                                st.rerun()
+                            else:
+                                st.error("帳號或密碼錯誤")
                         else:
-                            st.error("帳號或密碼錯誤")
-                            if users_df.empty:
-                                st.warning("提示：系統目前讀到的帳號名單是空的，請按『刷新資料庫』試試看。")
+                            st.error("系統錯誤：找不到 Account 或 Password 欄位")
+
+            # === 🔧 終極診斷室 (請點開這裡) ===
+            with st.expander("🔧 登入診斷室 (登不進去請務必點開查看)"):
+                st.markdown("### 1. 檢查欄位名稱")
+                st.write(f"系統讀到的所有欄位: `{list(users_df.columns)}`")
+                if "Account" not in users_df.columns:
+                    st.error("❌ 找不到 'Account' 欄位！請檢查 Google Sheet 第一列標題是否有空格？")
+                
+                st.markdown("### 2. 檢查帳號資料")
+                if users_df.empty:
+                    st.error("❌ 讀不到任何資料！請檢查 Google Sheet 是否為空？")
+                    if st.session_state.error_log:
+                        st.error(f"錯誤訊息: {st.session_state.error_log}")
+                else:
+                    st.dataframe(users_df) # 直接把資料秀出來給您看
+                    
+                    if input_acc:
+                        st.markdown("### 3. 比對結果")
+                        st.write(f"您輸入的帳號: `{input_acc}` (長度: {len(input_acc)})")
+                        st.write(f"您輸入的密碼: `{input_pwd}` (長度: {len(input_pwd)})")
+                        
+                        # 嘗試找帳號
+                        match = users_df[users_df["Account"] == input_acc]
+                        if match.empty:
+                            st.warning("⚠️ 在表中找不到此帳號 (請檢查是否有隱形空白鍵)")
+                            # 列出所有帳號的真實樣子
+                            st.write("資料庫裡有的帳號 (含長度):")
+                            for acc in users_df["Account"]:
+                                st.text(f"'{acc}' (len={len(acc)})")
+                        else:
+                            st.success("✅ 帳號存在！檢查密碼...")
+                            real_pwd = match.iloc[0]["Password"]
+                            st.write(f"資料庫裡的密碼: `{real_pwd}` (長度: {len(real_pwd)})")
+                            if real_pwd == input_pwd:
+                                st.success("✅ 密碼完全一致 (應該要能登入)")
+                            else:
+                                st.error("❌ 密碼不一致 (請檢查大小寫或空白鍵)")
         return
 
     # === 登入後畫面 ===
