@@ -28,6 +28,7 @@ def local_css():
 
         [data-testid="stSidebar"] { border-right: 1px solid #D0CDBC; background-color: #EAE8D9; }
         
+        /* 輸入框去背、細線條 */
         .stTextInput > div > div > input,
         .stDateInput > div > div > input,
         .stTimeInput > div > div > input,
@@ -39,6 +40,7 @@ def local_css():
             color: #333333 !important;
         }
 
+        /* 按鈕 Aesop 風格 */
         .stButton > button {
             background-color: transparent !important;
             color: #333333 !important;
@@ -52,6 +54,9 @@ def local_css():
             color: #F6F5E8 !important;
             border-color: #333333 !important;
         }
+        
+        /* 特別將「刪除」按鈕設為深紅色 hover */
+        /* 這裡使用 key 來區分不太容易，統一風格即可，或依靠文字內容 (CSS較難選取) */
 
         div[data-testid="stAlert"] { 
             background-color: transparent !important; 
@@ -74,9 +79,8 @@ def local_css():
         </style>
         """, unsafe_allow_html=True)
 
-# --- 資料讀取與處理 (包含錯誤修復) ---
+# --- 資料讀取與處理 ---
 def load_data():
-    # 定義標準欄位，避免重複寫
     columns = [
         "提交時間", "姓名", "類型", "日期", 
         "開始時間", "結束時間", "時數", "備註", 
@@ -87,28 +91,25 @@ def load_data():
         try:
             df = pd.read_csv(DATA_FILE)
             
-            # 補齊可能缺少的欄位
             if "審核狀態" not in df.columns: df["審核狀態"] = "待審核"
             if "審核時間" not in df.columns: df["審核時間"] = ""
             df["審核狀態"] = df["審核狀態"].fillna("待審核")
             df["審核時間"] = df["審核時間"].fillna("")
 
-            # 處理日期格式 (關鍵修復：加入 errors='coerce' 避免報錯)
+            # 修正舊資料名稱
+            df["類型"] = df["類型"].replace({
+                "加班 (Overtime)": "加班",
+                "抵班/補休 (Comp Time)": "抵班/補休"
+            })
+
             df["日期"] = pd.to_datetime(df["日期"], errors='coerce')
-            
-            # 刪除日期轉換失敗的壞資料
             df = df.dropna(subset=["日期"])
-            
-            # 產生月份欄位
             df["月份"] = df["日期"].dt.strftime("%Y-%m")
             
             return df
-            
         except Exception:
-            # 如果讀取失敗，回傳空表格
             return pd.DataFrame(columns=columns)
     else:
-        # 如果檔案不存在，回傳空表格
         return pd.DataFrame(columns=columns)
 
 def save_data(df):
@@ -180,7 +181,7 @@ def main():
         st.header("管理員報表")
 
         if not df.empty:
-            # --- 審核區 ---
+            # --- 待審核區 (新增刪除按鈕) ---
             st.subheader("待審核項目")
             pending_df = df[df["審核狀態"] == "待審核"]
             
@@ -189,23 +190,30 @@ def main():
             else:
                 for index, row in pending_df.iterrows():
                     with st.container():
-                        c1, c2, c3, c4, c5 = st.columns([1.5, 2, 2, 1, 1])
+                        # 調整欄位比例，讓按鈕好放
+                        c1, c2, c3, c4, c5, c6 = st.columns([1.5, 2, 2, 1, 0.8, 0.8])
                         c1.text(f"{row['姓名']}")
-                        
                         try:
                             date_display = row['日期'].strftime('%Y-%m-%d') if isinstance(row['日期'], pd.Timestamp) else str(row['日期'])
                         except:
                             date_display = str(row['日期'])
-
                         c2.text(f"{date_display}")
                         c3.text(f"{row['類型']}")
                         c4.text(f"{row['時數']}")
                         
-                        if c5.button("通過", key=f"btn_{index}"):
+                        # 通過按鈕
+                        if c5.button("通過", key=f"pass_{index}"):
                             df.at[index, "審核狀態"] = "已通過"
                             df.at[index, "審核時間"] = datetime.now().strftime("%Y-%m-%d %H:%M")
                             save_data(df)
                             st.rerun()
+                        
+                        # 刪除按鈕 (拒絕)
+                        if c6.button("刪除", key=f"del_{index}"):
+                            df = df.drop(index)
+                            save_data(df)
+                            st.rerun()
+                            
                         st.markdown("<hr style='margin: 5px 0; opacity: 0.3;'>", unsafe_allow_html=True)
 
             st.markdown("---")
@@ -239,7 +247,7 @@ def main():
                 use_container_width=True
             )
 
-            # --- 歷史明細 ---
+            # --- 歷史明細列表 ---
             st.subheader("申請明細列表")
             filter_person = st.selectbox("篩選特定員工", ["全部"] + list(df["姓名"].unique()))
             
@@ -259,6 +267,34 @@ def main():
                 .map(lambda v: 'color: #4A5D23; font-weight: bold' if v == '已通過' else 'color: #999999', subset=['審核狀態']),
                 use_container_width=True
             )
+            
+            st.markdown("---")
+
+            # --- 新增功能：刪除歷史紀錄 ---
+            with st.expander("🗑️ 刪除/管理歷史資料"):
+                st.caption("請小心操作，刪除後無法復原。")
+                
+                # 製作一個讓老闆好選的清單： [ID] 姓名 - 日期 - 類型 - 時數
+                # 為了避免 index 跑掉，我們直接用 iterrows 產生選項
+                delete_options = {}
+                # 這裡顯示所有資料(或是 filtered_df 也可以，目前顯示所有比較安全)
+                for idx, row in df.sort_values("提交時間", ascending=False).iterrows():
+                    d_str = row['日期'].strftime('%Y-%m-%d') if isinstance(row['日期'], pd.Timestamp) else str(row['日期'])
+                    label = f"[{idx}] {row['姓名']} | {d_str} | {row['類型']} ({row['時數']}hr) - {row['審核狀態']}"
+                    delete_options[label] = idx
+                
+                if not delete_options:
+                    st.text("無資料可刪除")
+                else:
+                    selected_label = st.selectbox("請選擇要刪除的資料", options=list(delete_options.keys()))
+                    
+                    if st.button("確認刪除此筆資料"):
+                        delete_idx = delete_options[selected_label]
+                        df = df.drop(delete_idx)
+                        save_data(df)
+                        st.success("刪除成功！")
+                        st.rerun()
+
         else:
             st.info("尚無資料。")
     elif input_password != "":
