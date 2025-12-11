@@ -1,10 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date
-import os
-
-# --- 設定檔案儲存路徑 ---
-DATA_FILE = "schedule_data.csv"
+from streamlit_gsheets import GSheetsConnection # 引入 Google 連線套件
 
 # --- 讀取密碼 ---
 if "admin_password" in st.secrets:
@@ -12,7 +9,7 @@ if "admin_password" in st.secrets:
 else:
     ADMIN_PASSWORD = "boss"
 
-# --- 產生 30 分鐘間隔的時間列表 (00:00 ~ 23:30) ---
+# --- 產生 30 分鐘間隔的時間列表 ---
 TIME_OPTIONS = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
 
 # --- Aesop 風格 CSS ---
@@ -34,61 +31,66 @@ def local_css():
         [data-testid="stDataFrame"] { border: 1px solid #CCCCCC; }
         [data-testid="stDataFrame"] th { background-color: #E0DED0 !important; color: #333333 !important; }
         div[data-testid="stDialog"] { border-radius: 0px !important; background-color: #F6F5E8 !important; }
-        
-        /* 讓 checkbox 置中 */
         [data-testid="stCheckbox"] { display: flex; justify-content: center; }
         </style>
         """, unsafe_allow_html=True)
 
-# --- 資料讀取 ---
-def load_data():
+# --- 資料讀取 (Google Sheets 版) ---
+def load_data(conn):
     columns = [
         "提交時間", "姓名", "類型", "日期", 
         "開始時間", "結束時間", "時數", "備註", 
         "審核狀態", "審核時間", "月份"
     ]
-
-    if os.path.exists(DATA_FILE):
-        try:
-            df = pd.read_csv(DATA_FILE, encoding='utf-8-sig', dtype=str)
-            for col in columns:
-                if col not in df.columns: df[col] = ""
-            df = df.fillna("")
-            
-            # 強制轉換
-            df["時數"] = pd.to_numeric(df["時數"], errors='coerce').fillna(0.0)
-            df["日期_obj"] = pd.to_datetime(df["日期"], errors='coerce')
-            df.loc[df["日期_obj"].isna(), "日期_obj"] = datetime(1900, 1, 1)
-            
-            df["月份"] = df["日期_obj"].dt.strftime("%Y-%m")
-            df.loc[df["月份"] == "1900-01", "月份"] = "未知"
-            
-            df["類型"] = df["類型"].astype(str).str.strip()
-            df["審核狀態"] = df["審核狀態"].replace("", "待審核")
-            
-            # 設定 ID
-            if df.index.name != "id":
-                df.index.name = "id"
-            
-            return df
-        except Exception as e:
-            st.error(f"讀取錯誤: {e}")
-            return pd.DataFrame(columns=columns)
-    else:
+    
+    try:
+        # 從 Google Sheets 的 "Records" 分頁讀取資料
+        # ttl=0 代表不快取，每次都抓最新的
+        df = conn.read(worksheet="Records", ttl=0)
+        
+        # 如果是空的或欄位不對，補齊欄位
+        for col in columns:
+            if col not in df.columns: df[col] = ""
+        df = df.fillna("")
+        
+        # 強制轉換格式 (跟之前一樣的防錯機制)
+        df["時數"] = pd.to_numeric(df["時數"], errors='coerce').fillna(0.0)
+        df["日期_obj"] = pd.to_datetime(df["日期"], errors='coerce')
+        df.loc[df["日期_obj"].isna(), "日期_obj"] = datetime(1900, 1, 1)
+        
+        df["月份"] = df["日期_obj"].dt.strftime("%Y-%m")
+        df.loc[df["月份"] == "1900-01", "月份"] = "未知"
+        
+        df["類型"] = df["類型"].astype(str).str.strip()
+        df["審核狀態"] = df["審核狀態"].replace("", "待審核")
+        
+        # 確保全部轉為字串儲存，避免 Google Sheets 格式亂跳
+        # 除了時數維持數字
+        
+        return df
+    except Exception as e:
+        # 如果是第一次建立，可能是空的，回傳空表
         return pd.DataFrame(columns=columns)
 
-def save_data(df):
+# --- 資料存檔 (Google Sheets 版) ---
+def save_data(conn, df):
     try:
         df_save = df.copy()
+        # 移除暫存欄位
         if "日期_obj" in df_save.columns:
             df_save = df_save.drop(columns=["日期_obj"])
         if "勾選刪除" in df_save.columns:
             df_save = df_save.drop(columns=["勾選刪除"])
-        df_save.to_csv(DATA_FILE, index=False, encoding='utf-8-sig')
+            
+        # 寫入 Google Sheets 的 "Records" 分頁
+        conn.update(worksheet="Records", data=df_save)
+        
+        # 清除快取，確保下次讀到最新的
+        st.cache_data.clear()
     except Exception as e:
-        st.error(f"存檔失敗: {e}")
+        st.error(f"雲端存檔失敗: {e}")
 
-# --- 彈出視窗 (含複製文字) ---
+# --- 彈出視窗 ---
 @st.dialog("申請確認")
 def success_dialog(name, apply_type, date_str, duration, note):
     st.markdown(f"""
@@ -100,10 +102,8 @@ def success_dialog(name, apply_type, date_str, duration, note):
     """)
     
     st.markdown("👇 **點擊右上方複製，貼到群組：**")
-    
-    # [修改重點] 這裡改成您要求的格式：今天 [姓名] 有 [類型] [時數]小時 \n 原因:(備註)
+    # 修正後的格式
     copy_text = f"今天 {name} 有 {apply_type} {duration}小時\n原因:{note}"
-    
     st.code(copy_text, language=None)
     
     if st.button("關閉視窗"):
@@ -117,9 +117,17 @@ def main():
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
 
-    st.title("團隊時數管理系統")
+    # 建立 Google Sheets 連線
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+    except Exception as e:
+        st.error("無法連線到 Google Sheets，請檢查 Secrets 設定。")
+        st.stop()
 
-    df = load_data()
+    st.title("團隊時數管理系統 (雲端版)")
+
+    # 讀取資料 (傳入 conn 連線物件)
+    df = load_data(conn)
 
     # === 員工申請區 ===
     st.markdown("### 員工申請區")
@@ -132,11 +140,9 @@ def main():
             apply_type = c2.selectbox("申請類型", ["加班", "抵班/補休"])
             
             c3, c4 = st.columns(2)
-            
-            # 使用 30 分鐘間隔列表
+            # 30分鐘選單
             def_start = "09:00" if "09:00" in TIME_OPTIONS else TIME_OPTIONS[0]
             def_end = "18:00" if "18:00" in TIME_OPTIONS else TIME_OPTIONS[-1]
-            
             start_time_str = c3.selectbox("開始時間", TIME_OPTIONS, index=TIME_OPTIONS.index(def_start))
             end_time_str = c4.selectbox("結束時間", TIME_OPTIONS, index=TIME_OPTIONS.index(def_end))
             
@@ -150,7 +156,6 @@ def main():
                 else:
                     start_time = datetime.strptime(start_time_str, "%H:%M").time()
                     end_time = datetime.strptime(end_time_str, "%H:%M").time()
-                    
                     start_dt = datetime.combine(input_date, start_time)
                     end_dt = datetime.combine(input_date, end_time)
                     
@@ -174,13 +179,14 @@ def main():
                             "月份": input_date.strftime("%Y-%m")
                         }
                         
-                        current_df = load_data()
+                        # 重新讀取確保最新
+                        current_df = load_data(conn)
                         if "日期_obj" in current_df.columns:
                             current_df = current_df.drop(columns=["日期_obj"])
                         
                         new_df = pd.DataFrame([new_row])
                         final_df = pd.concat([current_df, new_df], ignore_index=True)
-                        save_data(final_df)
+                        save_data(conn, final_df)
                         
                         success_dialog(name, apply_type, date_str_save, duration, note)
 
@@ -206,7 +212,7 @@ def main():
         st.header("管理員報表")
 
         if not df.empty:
-            # --- 1. 待審核區 ---
+            # 1. 待審核
             st.subheader("待審核項目")
             pending_mask = df["審核狀態"].str.contains("待審核", na=False) | (df["審核狀態"] == "")
             pending_df = df[pending_mask]
@@ -227,19 +233,21 @@ def main():
                             c4.text(f"{row['時數']}")
                         
                         if c5.button("通過", key=f"pass_{idx}"):
+                            # 這裡要小心 index，因為 pending_df 的 index 是原始 df 的 index
+                            # 但我們操作 Google Sheets 需要整張表
                             df.at[idx, "審核狀態"] = "已通過"
                             df.at[idx, "審核時間"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-                            save_data(df)
+                            save_data(conn, df)
                             st.rerun()
                         if c6.button("刪除", key=f"del_{idx}"):
                             df = df.drop(idx)
-                            save_data(df)
+                            save_data(conn, df)
                             st.rerun()
                         st.markdown("<hr style='margin: 5px 0; opacity: 0.3;'>", unsafe_allow_html=True)
 
             st.markdown("---")
 
-            # --- 2. 統計報表 ---
+            # 2. 統計
             st.subheader("人員時數統計")
             try:
                 valid_months = [m for m in df["月份"].unique() if m != "未知" and m != ""]
@@ -277,11 +285,10 @@ def main():
 
             st.markdown("---")
 
-            # --- 3. 批量管理與刪除紀錄 ---
+            # 3. 批量管理
             st.subheader("管理所有紀錄 (批量刪除)")
             
             with st.expander("🔎 篩選與管理", expanded=True):
-                # 篩選器
                 f_col1, f_col2 = st.columns(2)
                 all_names = list(df["姓名"].unique())
                 filter_names = f_col1.multiselect("篩選人員", all_names, default=all_names)
@@ -293,12 +300,9 @@ def main():
                 except:
                     filter_date_range = []
 
-                # 套用篩選
                 display_df = df.copy()
-                
                 if filter_names:
                     display_df = display_df[display_df["姓名"].isin(filter_names)]
-                
                 if isinstance(filter_date_range, tuple) and len(filter_date_range) == 2:
                     start_d, end_d = filter_date_range
                     mask = (display_df["日期_obj"].dt.date >= start_d) & (display_df["日期_obj"].dt.date <= end_d)
@@ -309,7 +313,6 @@ def main():
                 except:
                     pass
 
-                # 準備編輯表格
                 display_df.insert(0, "勾選刪除", False)
                 show_cols = ["勾選刪除", "姓名", "類型", "日期", "時數", "審核狀態", "備註", "提交時間"]
                 
@@ -333,12 +336,12 @@ def main():
                     if st.button("🗑️ 確認刪除勾選的資料", type="primary"):
                         delete_indices = rows_to_delete.index.tolist()
                         df = df.drop(delete_indices)
-                        save_data(df)
+                        save_data(conn, df)
                         st.success("刪除成功！")
                         st.rerun()
 
         else:
-            st.info("尚無資料")
+            st.info("尚無資料 (Google Sheets 是空的)")
 
 if __name__ == "__main__":
     main()
